@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Home,
   ChefHat,
@@ -11,14 +11,24 @@ import {
   Camera,
   Loader2,
   ChevronRight,
+  Users,
+  RefreshCw,
 } from "lucide-react";
 import {
   getAllMeals,
   putMeal,
   deleteMealRecord,
-  getAllOrders,
+  uploadMealImage,
+  getOrdersForUser,
   putOrder,
-} from "./db.js";
+} from "./supabaseApi.js";
+import { isSupabaseConfigured } from "./supabaseClient.js";
+import {
+  USERS,
+  getStoredUserId,
+  setStoredUserId,
+  clearStoredUserId,
+} from "./users.js";
 
 /* ----------------------------- design tokens ----------------------------- */
 const COLORS = {
@@ -44,7 +54,6 @@ const CATEGORIES = [
   { key: "vegetable", label: "菜", emoji: "🥬" },
   { key: "soup", label: "湯品", emoji: "🍲" },
 ];
-const CAT_LABEL = Object.fromEntries(CATEGORIES.map((c) => [c.key, c.label]));
 
 /* ------------------------------- utilities -------------------------------- */
 function generateId(prefix) {
@@ -63,15 +72,7 @@ function displayDate(key) {
   return key.replaceAll("-", " / ");
 }
 
-function makePlaceholderImage(emoji, bg) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">
-    <rect width="300" height="300" rx="28" fill="${bg}"/>
-    <text x="50%" y="54%" font-size="120" text-anchor="middle" dominant-baseline="middle">${emoji}</text>
-  </svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
-function compressImage(file) {
+function compressImageFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -91,7 +92,18 @@ function compressImage(file) {
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", 0.72));
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error("圖片處理失敗"));
+              return;
+            }
+            resolve({ dataUrl, blob });
+          },
+          "image/jpeg",
+          0.72
+        );
       };
       img.onerror = () => reject(new Error("圖片讀取失敗"));
       img.src = e.target.result;
@@ -99,33 +111,6 @@ function compressImage(file) {
     reader.onerror = () => reject(new Error("檔案讀取失敗"));
     reader.readAsDataURL(file);
   });
-}
-
-function createSeedMeals() {
-  const now = Date.now();
-  const items = [
-    ["staple", "白飯", "#F4E7C9"],
-    ["staple", "地瓜飯", "#EFD9A8"],
-    ["meat", "香煎雞腿", "#F1D3C0"],
-    ["meat", "紅燒排骨", "#E9C3B0"],
-    ["egg", "荷包蛋", "#FBEFC7"],
-    ["egg", "番茄炒蛋", "#F7D9B0"],
-    ["vegetable", "炒高麗菜", "#DCEBCB"],
-    ["vegetable", "燙青花菜", "#CFE6C4"],
-    ["soup", "玉米濃湯", "#FBE7B8"],
-    ["soup", "味噌湯", "#E3D3B8"],
-  ];
-  return items.map(([category, name, bg], i) => ({
-    id: generateId("meal"),
-    name,
-    category,
-    image: makePlaceholderImage(
-      CATEGORIES.find((c) => c.key === category).emoji,
-      bg
-    ),
-    isActive: true,
-    createdAt: now + i,
-  }));
 }
 
 /* -------------------------------- pieces ---------------------------------- */
@@ -237,6 +222,64 @@ function BottomNav({ page, setPage }) {
   );
 }
 
+function UserSelectScreen({ users, onSelect }) {
+  return (
+    <div
+      className="mx-auto flex min-h-screen w-full max-w-md flex-col items-center justify-center px-6"
+      style={{ backgroundColor: COLORS.bg }}
+    >
+      <div
+        className="mb-6 flex items-center justify-center rounded-full"
+        style={{ width: 72, height: 72, backgroundColor: COLORS.primaryLight }}
+      >
+        <Users size={32} color={COLORS.primary} />
+      </div>
+      <h1 className="mb-1 text-xl font-extrabold" style={{ color: COLORS.ink }}>
+        今天是誰點餐？
+      </h1>
+      <p className="mb-8 text-sm font-semibold" style={{ color: COLORS.muted }}>
+        選好之後，下次開啟不用再選一次
+      </p>
+      <div className="w-full space-y-3">
+        {users.map((u) => (
+          <button
+            key={u.id}
+            onClick={() => onSelect(u.id)}
+            className="w-full rounded-2xl py-4 text-base font-extrabold text-white shadow-sm transition-transform active:scale-95"
+            style={{ backgroundColor: COLORS.primary }}
+          >
+            {u.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CurrentUserBar({ userName, onSwitch }) {
+  return (
+    <div
+      className="flex items-center justify-between px-4 py-2.5"
+      style={{ borderBottom: `1px solid ${COLORS.border}`, backgroundColor: COLORS.card }}
+    >
+      <div className="flex items-center gap-1.5">
+        <Users size={15} color={COLORS.primary} />
+        <span className="text-sm font-bold" style={{ color: COLORS.ink }}>
+          {userName}
+        </span>
+      </div>
+      <button
+        onClick={onSwitch}
+        className="flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-bold"
+        style={{ backgroundColor: COLORS.primaryLight, color: COLORS.primaryDark }}
+      >
+        <RefreshCw size={12} />
+        切換使用者
+      </button>
+    </div>
+  );
+}
+
 function ModalShell({ children, onClose }) {
   return (
     <div
@@ -300,7 +343,8 @@ function ConfirmDialog({ title, lines, confirmLabel, danger, onCancel, onConfirm
 function MealFormModal({ meal, defaultCategory, onCancel, onSave, busy }) {
   const [name, setName] = useState(meal?.name || "");
   const [category, setCategory] = useState(meal?.category || defaultCategory);
-  const [image, setImage] = useState(meal?.image || "");
+  const [previewImage, setPreviewImage] = useState(meal?.image || "");
+  const [pendingBlob, setPendingBlob] = useState(null);
   const [isActive, setIsActive] = useState(meal ? meal.isActive : true);
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -311,33 +355,39 @@ function MealFormModal({ meal, defaultCategory, onCancel, onSave, busy }) {
     setUploading(true);
     setError("");
     try {
-      const dataUrl = await compressImage(file);
-      setImage(dataUrl);
+      const { dataUrl, blob } = await compressImageFile(file);
+      setPreviewImage(dataUrl);
+      setPendingBlob(blob);
     } catch (err) {
-      setError("圖片上傳失敗，請再試一次");
+      setError("圖片處理失敗，請再試一次");
     } finally {
       setUploading(false);
     }
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!name.trim()) {
       setError("請輸入餐點名稱");
       return;
     }
-    if (!image) {
+    if (!previewImage) {
       setError("請上傳一張餐點圖片");
       return;
     }
     setError("");
-    onSave({
-      id: meal?.id || generateId("meal"),
-      name: name.trim(),
-      category,
-      image,
-      isActive,
-      createdAt: meal?.createdAt || Date.now(),
-    });
+    try {
+      await onSave({
+        id: meal?.id || generateId("meal"),
+        name: name.trim(),
+        category,
+        isActive,
+        createdAt: meal?.createdAt || Date.now(),
+        imageBlob: pendingBlob,
+        existingImageUrl: meal?.image || null,
+      });
+    } catch (err) {
+      setError("儲存失敗，請確認網路連線後再試一次");
+    }
   };
 
   return (
@@ -358,8 +408,8 @@ function MealFormModal({ meal, defaultCategory, onCancel, onSave, busy }) {
             >
               {uploading ? (
                 <Loader2 size={20} className="animate-spin" color={COLORS.primary} />
-              ) : image ? (
-                <img src={image} alt="preview" className="h-full w-full object-cover" />
+              ) : previewImage ? (
+                <img src={previewImage} alt="preview" className="h-full w-full object-cover" />
               ) : (
                 <Camera size={26} color={COLORS.muted} />
               )}
@@ -368,7 +418,7 @@ function MealFormModal({ meal, defaultCategory, onCancel, onSave, busy }) {
               className="cursor-pointer rounded-2xl px-4 py-2.5 text-sm font-bold"
               style={{ backgroundColor: COLORS.primaryLight, color: COLORS.primaryDark }}
             >
-              {image ? "更換圖片" : "上傳圖片"}
+              {previewImage ? "更換圖片" : "上傳圖片"}
               <input
                 type="file"
                 accept="image/*"
@@ -689,11 +739,11 @@ function ManagePage({ meals, category, setCategory, onAdd, onEdit, onToggleActiv
   );
 }
 
-function HistoryPage({ orders, onOpen }) {
+function HistoryPage({ orders, onOpen, userName }) {
   return (
     <div className="px-4 pb-24 pt-6">
       <h1 className="mb-4 text-2xl font-extrabold" style={{ color: COLORS.ink }}>
-        歷史紀錄
+        {userName ? `${userName} 的歷史紀錄` : "歷史紀錄"}
       </h1>
       {orders.length === 0 ? (
         <p className="py-10 text-center text-sm font-semibold" style={{ color: COLORS.muted }}>
@@ -769,8 +819,10 @@ function HistoryDetailModal({ order, onClose }) {
 
 /* ---------------------------------- app ------------------------------------ */
 export default function App() {
-  const [loading, setLoading] = useState(true);
-  const [storageError, setStorageError] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState(getStoredUserId);
+  const [loading, setLoading] = useState(() => Boolean(getStoredUserId()));
+  const [loadError, setLoadError] = useState(false);
+  const [retryTick, setRetryTick] = useState(0);
   const [page, setPage] = useState("today");
 
   const [meals, setMeals] = useState([]);
@@ -795,23 +847,26 @@ export default function App() {
 
   const [historyDetail, setHistoryDetail] = useState(null);
 
+  const todayModeRef = useRef(todayMode);
   useEffect(() => {
+    todayModeRef.current = todayMode;
+  }, [todayMode]);
+
+  // Full load whenever the signed-in user changes (or a retry is requested).
+  useEffect(() => {
+    if (!currentUserId) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
     (async () => {
-      if (!window.indexedDB) {
-        setStorageError(true);
-        setLoading(false);
-        return;
-      }
+      setLoading(true);
       try {
-        let loadedMeals = await getAllMeals();
-        if (loadedMeals.length === 0) {
-          const seed = createSeedMeals();
-          for (const m of seed) {
-            await putMeal(m);
-          }
-          loadedMeals = seed;
-        }
-        const loadedOrders = await getAllOrders();
+        const [loadedMeals, loadedOrders] = await Promise.all([
+          getAllMeals(),
+          getOrdersForUser(currentUserId),
+        ]);
+        if (cancelled) return;
         const tKey = todayKey();
         const existing = loadedOrders.find((o) => o.date === tKey) || null;
 
@@ -819,21 +874,58 @@ export default function App() {
         setOrders(loadedOrders);
         setTodayOrder(existing);
         setTodayMode(existing ? "view" : "edit");
-        if (existing) {
-          setSelection({
-            staple: existing.staple?.mealId || null,
-            meat: existing.meat?.mealId || null,
-            egg: existing.egg?.mealId || null,
-            vegetable: existing.vegetable?.mealId || null,
-            soup: existing.soup?.mealId || null,
-          });
-        }
+        setSelection({
+          staple: existing?.staple?.mealId || null,
+          meat: existing?.meat?.mealId || null,
+          egg: existing?.egg?.mealId || null,
+          vegetable: existing?.vegetable?.mealId || null,
+          soup: existing?.soup?.mealId || null,
+        });
+        setLoadError(false);
       } catch (e) {
-        setStorageError(true);
+        if (!cancelled) setLoadError(true);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId, retryTick]);
+
+  // Light background refresh when switching tabs, so changes made on other
+  // devices show up without needing a full realtime subscription. Won't
+  // clobber an in-progress (unsaved) selection on the today page.
+  useEffect(() => {
+    if (!currentUserId) return;
+    if (page === "manage") {
+      getAllMeals().then(setMeals).catch(() => {});
+    } else if (page === "history") {
+      getOrdersForUser(currentUserId).then(setOrders).catch(() => {});
+    } else if (page === "today") {
+      getAllMeals().then(setMeals).catch(() => {});
+      getOrdersForUser(currentUserId)
+        .then((loadedOrders) => {
+          setOrders(loadedOrders);
+          if (todayModeRef.current !== "view") return;
+          const tKey = todayKey();
+          const existing = loadedOrders.find((o) => o.date === tKey) || null;
+          setTodayOrder(existing);
+        })
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  const handleSelectUser = useCallback((id) => {
+    setStoredUserId(id);
+    setCurrentUserId(id);
+  }, []);
+
+  const handleSwitchUser = useCallback(() => {
+    clearStoredUserId();
+    setCurrentUserId(null);
+    setPage("today");
   }, []);
 
   const handleSubmitOrder = useCallback(async () => {
@@ -842,6 +934,7 @@ export default function App() {
       const order = {
         id: todayOrder?.id || generateId("order"),
         date: todayKey(),
+        userId: currentUserId,
         createdAt: todayOrder?.createdAt || Date.now(),
         updatedAt: Date.now(),
       };
@@ -862,11 +955,23 @@ export default function App() {
     } finally {
       setSubmitting(false);
     }
-  }, [meals, selection, todayOrder]);
+  }, [meals, selection, todayOrder, currentUserId]);
 
-  const handleSaveMeal = useCallback(async (mealData) => {
+  const handleSaveMeal = useCallback(async (formResult) => {
     setSavingMeal(true);
     try {
+      let imageUrl = formResult.existingImageUrl;
+      if (formResult.imageBlob) {
+        imageUrl = await uploadMealImage(formResult.imageBlob, formResult.id);
+      }
+      const mealData = {
+        id: formResult.id,
+        name: formResult.name,
+        category: formResult.category,
+        image: imageUrl,
+        isActive: formResult.isActive,
+        createdAt: formResult.createdAt,
+      };
       await putMeal(mealData);
       setMeals((prev) => {
         const exists = prev.some((m) => m.id === mealData.id);
@@ -889,10 +994,33 @@ export default function App() {
 
   const handleDeleteMeal = useCallback(async () => {
     if (!deleteTarget) return;
-    await deleteMealRecord(deleteTarget.id);
+    await deleteMealRecord(deleteTarget.id, deleteTarget.image);
     setMeals((prev) => prev.filter((m) => m.id !== deleteTarget.id));
     setDeleteTarget(null);
   }, [deleteTarget]);
+
+  if (!isSupabaseConfigured) {
+    return (
+      <div
+        className="flex min-h-screen flex-col items-center justify-center gap-2 p-6 text-center"
+        style={{ backgroundColor: COLORS.bg }}
+      >
+        <p className="text-sm font-bold" style={{ color: COLORS.danger }}>
+          尚未設定 Supabase 連線資訊
+        </p>
+        <p className="text-xs font-semibold" style={{ color: COLORS.muted }}>
+          請設定環境變數 VITE_SUPABASE_URL 與 VITE_SUPABASE_ANON_KEY
+          （本機開發請建立 .env，Netlify 請於 Environment variables 設定）。
+        </p>
+      </div>
+    );
+  }
+
+  if (!currentUserId) {
+    return <UserSelectScreen users={USERS} onSelect={handleSelectUser} />;
+  }
+
+  const currentUser = USERS.find((u) => u.id === currentUserId);
 
   if (loading) {
     return (
@@ -905,15 +1033,22 @@ export default function App() {
     );
   }
 
-  if (storageError) {
+  if (loadError) {
     return (
       <div
-        className="flex min-h-screen items-center justify-center p-6 text-center"
+        className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center"
         style={{ backgroundColor: COLORS.bg }}
       >
         <p className="text-sm font-semibold" style={{ color: COLORS.danger }}>
-          目前無法使用儲存功能，請確認裝置支援後再試一次。
+          無法連線到雲端資料庫，請確認網路連線與 Supabase 設定後再試一次。
         </p>
+        <button
+          onClick={() => setRetryTick((t) => t + 1)}
+          className="rounded-2xl px-5 py-2.5 text-sm font-bold text-white"
+          style={{ backgroundColor: COLORS.primary }}
+        >
+          重新整理
+        </button>
       </div>
     );
   }
@@ -928,6 +1063,8 @@ export default function App() {
       className="mx-auto min-h-screen w-full max-w-md"
       style={{ backgroundColor: COLORS.bg, fontFamily: "system-ui, -apple-system, 'PingFang TC', 'Noto Sans TC', sans-serif" }}
     >
+      <CurrentUserBar userName={currentUser?.name} onSwitch={handleSwitchUser} />
+
       {page === "today" && (
         <TodayPage
           meals={meals}
@@ -961,7 +1098,11 @@ export default function App() {
       )}
 
       {page === "history" && (
-        <HistoryPage orders={orders} onOpen={(o) => setHistoryDetail(o)} />
+        <HistoryPage
+          orders={orders}
+          onOpen={(o) => setHistoryDetail(o)}
+          userName={currentUser?.name}
+        />
       )}
 
       <BottomNav page={page} setPage={setPage} />
@@ -1007,3 +1148,4 @@ export default function App() {
     </div>
   );
 }
+
